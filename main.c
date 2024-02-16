@@ -73,7 +73,7 @@ int main(void) {
     if (htonl(0x10203040) == 0x10203040) {
         setup_req[setup_req_offset] = 0x42; /* MSB first */
     } else {
-        setup_req[setup_req_offset] = 0x5c; /* LSB first */
+        setup_req[setup_req_offset] = 0x6c; /* LSB first */
     }
     setup_req_offset++;
 
