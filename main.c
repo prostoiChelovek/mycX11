@@ -12,8 +12,8 @@
 /* number of bytes needed to round x up to a multiple of four.*/
 #define X_NET_PAD(x) (4 - (x % 4)) % 4
 
+typedef uint32_t X_id;
 typedef uint32_t X_Window;
-typedef uint32_t X_Visual_id;
 typedef uint32_t X_Colormap;
 typedef uint8_t X_Keycode;
 typedef uint32_t X_Set_of_Event;
@@ -66,8 +66,14 @@ enum X_Event {
     X_EVENT_OwnerGrabButton = 0x01000000
 };
 
+enum X_Window_Class {
+    X_WIN_CLASS_INPUT_OUTPUT,
+    X_WIN_CLASS_INPUT_ONLY,
+    X_WIN_CLASS_COPY_FROM_PARENT
+};
+
 struct X_Visual_type {
-    X_Visual_id visual_id;
+    X_id visual_id;
     enum X_Visual_type_Class class;
     uint32_t red_mask;
     uint32_t green_mask;
@@ -94,7 +100,7 @@ struct X_Screen {
     struct X_Depth * allowed_depths;
 
     uint8_t root_depth;
-    X_Visual_id root_visual;
+    X_id root_visual;
     X_Colormap default_colormap;
     uint32_t white_px;
     uint32_t black_px;
@@ -126,8 +132,8 @@ struct X_Setup_success_reply {
     unsigned char * vendor;
 
     uint32_t release_num;
-    uint32_t resource_id_base;
-    uint32_t resource_id_mask;
+    X_id resource_id_base;
+    X_id resource_id_mask;
     enum X_Img_byte_order img_byte_order;
     uint8_t bitmap_scanline_unit;
     uint8_t bitmap_scanline_pad;
@@ -145,7 +151,44 @@ struct X_Setup_success_reply {
     X_Keycode max_keycode;
 };
 
-int main(void) {
+struct X {
+    int sock;
+
+    X_id root_wid;
+    struct X_Visual_type root_visual;
+
+    /*
+    The resource_id_mask contains a single contiguous set of bits (at least 18).
+
+    The client allocates resource IDs for types WINDOW, PIXMAP, CURSOR, FONT, GCONTEXT, and COLORMAP
+    by choosing a value with only some subset of these bits set and ORing it with resource_id_base.
+    Only values constructed in this way can be used to name newly created resources over this con-
+    nection. Resource IDs never hav e the top three bits set. The client is not restricted to linear or
+    contiguous allocation of resource IDs. Once an ID has been freed, it can be reused. An ID must
+    be unique with respect to the IDs of all other resources, not just other resources of the same type.
+    However, note that the value spaces of resource identifiers, atoms, visualids, and keysyms are dis-
+    tinguished by context, and as such, are not required to be disjoint; for example, a given numeric
+    value might be both a valid window ID, a valid atom, and a valid keysym.
+    */
+    X_id resource_id_base;
+    X_id resource_id_mask;
+
+    X_id allocated_ids_num;
+};
+
+void X_destroy(struct X * x) {
+    if (x == NULL) {
+        return;
+    }
+
+    close(x->sock);
+
+    free(x);
+}
+
+struct X * make_X() {
+    /* TODO: report error reasons; do not print anything */ 
+
     size_t i;
     size_t j;
     size_t k;
@@ -176,15 +219,21 @@ int main(void) {
     ssize_t sent_len = -1;
     ssize_t recv_len = -1;
 
+    struct X_Screen * root;
+    struct X_Depth * root_allowed_depth;
+    struct X_Visual_type * root_visual;
+
+    struct X * x;
+
     if (strlen(X_SOCKET_PATH) > sizeof(sock_addr.sun_path)) {
         fputs("X_SOCKET_PATH too long\n", stderr);
-        return 1;
+        return NULL;
     }
 
     sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("socket");
-        return 1;
+        return NULL;
     }
 
     sock_addr.sun_family = AF_UNIX;
@@ -192,7 +241,7 @@ int main(void) {
     if (connect(sock, (struct sockaddr *)&sock_addr, sizeof(struct sockaddr_un)) != 0) {
         close(sock);
         perror("connect");
-        return 1;
+        return NULL;
     }
 
     setup_req_len =
@@ -203,7 +252,7 @@ int main(void) {
     if (setup_req == NULL) {
         close(sock);
         perror("malloc setup_req");
-        return 1;
+        return NULL;
     }
 
     setup_req_offset = 0;
@@ -245,7 +294,7 @@ int main(void) {
         close(sock);
         free(setup_req);
         perror("send setup_req");
-        return 1;
+        return NULL;
     }
 
     free(setup_req);
@@ -254,26 +303,25 @@ int main(void) {
     if (recv_len != 1) {
         close(sock);
         perror("recv setup_resp_success");
-        return 1;
+        return NULL;
     }
 
     switch (setup_resp_success) {
     case 1: /* Success */
-        puts("Success");
         break;
     case 0: /* Failed */
         setup_resp = (unsigned char *)malloc(7);
         if (setup_resp == NULL) {
             close(sock);
             perror("malloc setup_resp in Failed (7)");
-            return 1;
+            return NULL;
         }
         recv_len = recv(sock, (void *)setup_resp, 7, 0);
         if (recv_len != 7) {
             free(setup_resp);
             close(sock);
             perror("recv setup_resp in Failed (7)");
-            return 1;
+            return NULL;
         }
         setup_resp_len = (*(uint16_t*)(setup_resp + 5)) * 4;
         free(setup_resp);
@@ -281,14 +329,14 @@ int main(void) {
         if (setup_resp == NULL) {
             close(sock);
             perror("malloc setup_resp in Failed");
-            return 1;
+            return NULL;
         }
         recv_len = recv(sock, (void *)setup_resp, setup_resp_len, 0);
         if (recv_len != setup_resp_len) {
             close(sock);
             free(setup_resp);
             perror("recv setup_resp in Failed");
-            return 1;
+            return NULL;
         }
 
         printf("Failed: '%s'\n", (char*)(setup_resp));
@@ -296,15 +344,15 @@ int main(void) {
         free(setup_resp);
 
         close(sock);
-        return 1;
+        return NULL;
     case 2: /* Authenticate */
         puts("Authenticate\n");
         close(sock);
-        return 1;
+        return NULL;
     default:
         fprintf(stderr, "Unexpected setup_resp_success: '%u'\n", setup_resp_success);
         close(sock);
-        return 1;
+        return NULL;
     }
 
     /* will only get this far if Success */
@@ -314,13 +362,13 @@ int main(void) {
     if (setup_resp == NULL) {
         close(sock);
         perror("malloc setup_resp (7)");
-        return 1;
+        return NULL;
     }
     recv_len = recv(sock, (void *)setup_resp, setup_resp_len, 0);
     if (recv_len != setup_resp_len) {
         close(sock);
         perror("recv setup_resp");
-        return 1;
+        return NULL;
     }
     setup_resp_len = (*(uint16_t *)(setup_resp + 5)) * 4;
     free(setup_resp);
@@ -328,14 +376,14 @@ int main(void) {
     if (setup_resp == NULL) {
         close(sock);
         perror("malloc setup_resp (big)");
-        return 1;
+        return NULL;
     }
     setup_resp_field = setup_resp;
     recv_len = recv(sock, (void *)setup_resp, setup_resp_len, 0);
     if (recv_len != setup_resp_len) {
         close(sock);
         perror("recv setup_resp");
-        return 1;
+        return NULL;
     }
 
     memset((void*)&setup_reply, 0, sizeof(setup_reply));
@@ -383,7 +431,7 @@ int main(void) {
         free(setup_resp);
         close(sock);
         perror("malloc setup_reply.vendor");
-        return 1;
+        return NULL;
     }
     memcpy((void *)setup_reply.vendor, (void *)setup_resp_field, setup_reply.vendor_len);
     setup_resp_field += setup_reply.vendor_len;
@@ -397,7 +445,7 @@ int main(void) {
         free(setup_resp);
         close(sock);
         perror("calloc pixmap_formats");
-        return 1;
+        return NULL;
     }
     for (i = 0; i < setup_reply.pixmap_formats_len; i++) {
         setup_reply.pixmap_formats[i].depth = *(uint8_t *)setup_resp_field;
@@ -416,7 +464,7 @@ int main(void) {
         free(setup_resp);
         close(sock);
         perror("calloc setup_reply.roots");
-        return 1;
+        return NULL;
     }
     for (i = 0; i < setup_reply.roots_len; i++) {
         setup_reply.roots[i].root = *(uint32_t *)setup_resp_field;
@@ -481,7 +529,7 @@ int main(void) {
             free(setup_resp);
             close(sock);
             perror("calloc allowed_depths");
-            return 1;
+            return NULL;
         }
         for (j = 0; j < setup_reply.roots[i].allowed_depths_len; j++) {
             setup_reply.roots[i].allowed_depths[j].depth = *(uint8_t *)setup_resp_field;
@@ -496,7 +544,7 @@ int main(void) {
                     sizeof(struct X_Visual_type));
             if (setup_reply.roots[i].allowed_depths[j].visuals == NULL) {
                 /* TODO: cleanup. I give up */
-                return 1;
+                return NULL;
             }
             for (k = 0; k < setup_reply.roots[i].allowed_depths[j].visuals_len; k++) {
                 setup_reply.roots[i].allowed_depths[j].visuals[k].visual_id = *(uint32_t *)setup_resp_field;
@@ -531,6 +579,58 @@ int main(void) {
         }
     }
 
+    x = (struct X *)malloc(sizeof(struct X));
+    if (x == NULL) {
+        /* TODO: cleanup */
+        close(sock);
+        perror("malloc X");
+        return NULL;
+    }
+
+    x->sock = sock;
+    x->resource_id_base = setup_reply.resource_id_base;
+    x->resource_id_mask = setup_reply.resource_id_mask;
+    x->allocated_ids_num = 0;
+
+    /* TODO: should not be picking the first root */
+
+    if (setup_reply.roots_len == 0) {
+        /* TODO: cleanup */
+        free(x);
+        close(sock);
+        return NULL;
+    }
+
+    root = &setup_reply.roots[0];
+    root_allowed_depth = NULL;
+    root_visual = NULL;
+
+    x->root_wid = root->root;
+
+    for (i = 0; i < root->allowed_depths_len; i++) {
+        if (root->allowed_depths[i].depth == root->root_depth) {
+            root_allowed_depth = &root->allowed_depths[i];
+            break;
+        }
+    }
+    if (root_allowed_depth == NULL) {
+        /* TODO: cleanup */
+        fputs("root_allowed_depth not found\n", stderr);
+        return NULL;
+    }
+    for (i = 0; i < root_allowed_depth->visuals_len; i++) {
+        if (root_allowed_depth->visuals[i].visual_id == root->root_visual) {
+            root_visual = &root_allowed_depth->visuals[i];
+            break;
+        }
+    }
+    if (root_visual == NULL) {
+        /* TODO: cleanup */
+        fputs("root_visual not found\n", stderr);
+        return NULL;
+    }
+    memcpy((void *)&x->root_visual, (void *)root_visual, sizeof(struct X_Visual_type));
+
     for (i = 0; i < setup_reply.roots_len; i++) {
         for (j = 0; j < setup_reply.roots[i].allowed_depths_len; j++) {
             free(setup_reply.roots[i].allowed_depths[j].visuals);
@@ -541,7 +641,182 @@ int main(void) {
     free(setup_reply.pixmap_formats);
     free(setup_reply.vendor);
     free(setup_resp);
-    close(sock);
+
+    return x;
+}
+
+X_id X_alloc_id(struct X * x) {
+    X_id id;
+    uint32_t mask_shift = 0;
+
+    while (! ((x->resource_id_mask >> mask_shift) & 0x1)) {
+        mask_shift++;
+    }
+    id = x->resource_id_base | (x->allocated_ids_num << mask_shift);
+    x->allocated_ids_num++;
+
+    return id;
+}
+
+void X_free_id(struct X * x, X_id id) {
+    (void) id;
+    /* TODO */
+}
+
+uint32_t X_rgb(struct X * x, uint32_t r, uint32_t g, uint32_t b) {
+    uint32_t res = 0;
+    size_t shift = 0;
+
+    if (x->root_visual.class != X_VISUAL_CLASS_DIRECT_COLOR) {
+        /* TODO: this is so wrong */
+        fputs("Unsupported root_visual.class. TODO\n", stderr);
+        exit(1);
+    }
+
+    while (! ((x->root_visual.red_mask >> shift) & 0x1)) {
+        shift++;
+    }
+    res |= (r << shift) & x->root_visual.red_mask;
+    shift = 0;
+
+    while (! ((x->root_visual.green_mask >> shift) & 0x1)) {
+        shift++;
+    }
+    res |= (g << shift) & x->root_visual.green_mask;
+    shift = 0;
+
+    while (! ((x->root_visual.blue_mask >> shift) & 0x1)) {
+        shift++;
+    }
+    res |= (b << shift) & x->root_visual.blue_mask;
+
+    return res;
+}
+
+X_id X_create_window(struct X * x) {
+    X_id wid;
+    X_id parent_wid;
+    enum X_Window_Class class;
+    uint8_t depth;
+    uint16_t req_len;
+    X_id visual;
+    int16_t pos_x;
+    int16_t pos_y;
+    uint16_t width;
+    uint16_t height;
+    uint16_t border_width;
+    uint32_t value_mask;
+    uint32_t values[15];
+
+    size_t values_len;
+
+    unsigned char req[(8 + 15) * 4];
+    unsigned char * req_field;
+
+    unsigned char err_resp[32];
+    uint8_t err_code;
+
+    ssize_t sent_len = -1;
+    ssize_t recv_len = -1;
+
+    wid = X_alloc_id(x);
+    parent_wid = x->root_wid;
+    class = X_WIN_CLASS_COPY_FROM_PARENT;
+    depth = 0;  /* copy from parent */
+    visual = 0; /* copy from parent */
+    pos_x = 10;
+    pos_y = 10;
+    width = 100;
+    height = 100;
+    border_width = 1;
+
+    value_mask = 0x02; /* background-pixel */
+    values_len = 2; /* because background-pixel is the second value */
+    values[1] = X_rgb(x, 255, 128, 64);
+
+    req_len = 8 + values_len;
+
+    req_field = req;
+
+    *(uint8_t *)req_field = 1; /* CreateWindow */
+    req_field += 1;
+    *(uint8_t *)req_field = depth;
+    req_field += 1;
+    *(uint16_t *)req_field = req_len;
+    req_field += 2;
+    *(uint32_t *)req_field = wid;
+    req_field += 4;
+    *(uint32_t *)req_field = parent_wid;
+    req_field += 4;
+    *(int16_t *)req_field = pos_x;
+    req_field += 2;
+    *(int16_t *)req_field = pos_y;
+    req_field += 2;
+    *(uint16_t *)req_field = width;
+    req_field += 2;
+    *(uint16_t *)req_field = height;
+    req_field += 2;
+    *(uint16_t *)req_field = border_width;
+    req_field += 2;
+    *(uint16_t *)req_field = class;
+    req_field += 2;
+    *(uint32_t *)req_field = visual;
+    req_field += 4;
+    *(uint32_t *)req_field = value_mask;
+    req_field += 4;
+    memcpy((void *)req_field, (void *)values, values_len * 4);
+    req_field += values_len * 4;
+
+    sent_len = send(x->sock, (void *)req, (req_field - req), 0);
+    if (sent_len != (req_field - req)) {
+        perror("send");
+        return 0;
+    }
+
+    recv_len = recv(x->sock, (void *)err_resp, 32, 0);
+    if (recv_len < 0) {
+        perror("recv");
+        return 0;
+    } else if (recv_len == 32) {
+        err_code = err_resp[1];
+        printf("Err: %i\n", err_code);
+        return 0;
+    }
+
+    req_field = req;
+
+    *(uint8_t *)req_field = 8; /* MapWindow */
+    req_field += 1;
+    req_field += 1; /* unused */
+    *(uint16_t *)req_field = 2;
+    req_field += 2;
+    *(uint32_t *)req_field = wid;
+    req_field += 2;
+
+    sent_len = send(x->sock, (void *)req, (req_field - req), 0);
+    if (sent_len != (req_field - req)) {
+        perror("send");
+        return 0;
+    }
+
+    return wid;
+}
+
+void X_destroy_window(struct X * x, X_id id) {
+    if (x == NULL) {
+        return;
+    }
+    (void)id;
+    /* TODO */
+}
+
+int main(void) {
+    struct X * x = make_X();
+
+    X_id win = X_create_window(x);
+
+    X_destroy_window(x, win);
+    X_destroy(x);
 
     return 0;
 }
